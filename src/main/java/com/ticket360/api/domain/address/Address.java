@@ -13,8 +13,8 @@ import java.util.UUID;
 @Entity
 @Getter
 @Setter
-@NoArgsConstructor
 @AllArgsConstructor
+@NoArgsConstructor
 public class Address {
     @Id
     @GeneratedValue
@@ -23,7 +23,7 @@ public class Address {
     private String city;
     private String uf;
 
-    @ManyToOne
+    @OneToOne
     @JoinColumn(name = "event_id")
     private Event event;
 }

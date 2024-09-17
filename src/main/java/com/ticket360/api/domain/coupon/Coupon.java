@@ -10,12 +10,12 @@ import lombok.Setter;
 import java.util.Date;
 import java.util.UUID;
 
-@Table(name = "coupon")
 @Entity
+@Table(name = "coupon")
 @Getter
 @Setter
-@NoArgsConstructor
 @AllArgsConstructor
+@NoArgsConstructor
 public class Coupon {
     @Id
     @GeneratedValue

@@ -1,10 +1,15 @@
 package com.ticket360.api.service;
 
-import com.amazonaws.services.s3.AmazonS3;
-import com.ticket360.api.domain.event.Event;
-import com.ticket360.api.domain.event.EventRequestDTO;
-import com.ticket360.api.domain.event.EventResponseDTO;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.GetUrlRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+
+import com.ticket360.api.domain.address.Address;
+import com.ticket360.api.domain.coupon.Coupon;
+import com.ticket360.api.domain.event.*;
 import com.ticket360.api.repositories.EventRepository;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
@@ -13,13 +18,9 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.util.Date;
-import java.util.List;
-import java.util.Objects;
-import java.util.UUID;
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 public class EventService {
@@ -27,8 +28,17 @@ public class EventService {
     @Value("${aws.bucket.name}")
     private String bucketName;
 
+    @Value("${admin.key}")
+    private String adminKey;
+
     @Autowired
-    private AmazonS3 s3Client;
+    private S3Client s3Client;
+
+    @Autowired
+    private AddressService addressService;
+
+    @Autowired
+    private CouponService couponService;
 
     @Autowired
     private EventRepository repository;
@@ -36,7 +46,7 @@ public class EventService {
     public Event createEvent(EventRequestDTO data) {
         String imgUrl = null;
 
-        if(data.image() != null) {
+        if (data.image() != null) {
             imgUrl = this.uploadImg(data.image());
         }
 
@@ -50,37 +60,129 @@ public class EventService {
 
         repository.save(newEvent);
 
+        if (!data.remote()) {
+            this.addressService.createAddress(data, newEvent);
+        }
+
         return newEvent;
     }
 
     public List<EventResponseDTO> getUpcomingEvents(int page, int size) {
         Pageable pageable = PageRequest.of(page, size);
-        Page<Event> eventsPage = this.repository.findUpcomingEvents(new Date(), pageable);
-        return eventsPage.map(event -> new EventResponseDTO(event.getId(), event.getTitle(), event.getDescription(), event.getDate(), "", "", event.getRemote(), event.getEventUrl(), event.getImgUrl()))
+        Page<EventAddressProjection> eventsPage = this.repository.findUpcomingEvents(new Date(), pageable);
+        return eventsPage.map(event -> new EventResponseDTO(
+                        event.getId(),
+                        event.getTitle(),
+                        event.getDescription(),
+                        event.getDate(),
+                        event.getCity() != null ? event.getCity() : "",
+                        event.getUf() != null ? event.getUf() : "",
+                        event.getRemote(),
+                        event.getEventUrl(),
+                        event.getImgUrl())
+                )
                 .stream().toList();
     }
 
+    public EventDetailsDTO getEventDetails(UUID eventId) {
+        Event event = repository.findById(eventId)
+                .orElseThrow(() -> new IllegalArgumentException("Event not found"));
+
+        Optional<Address> address = addressService.findByEventId(eventId);
+
+        List<Coupon> coupons = couponService.consultCoupons(eventId, new Date());
+
+        List<EventDetailsDTO.CouponDTO> couponDTOs = coupons.stream()
+                .map(coupon -> new EventDetailsDTO.CouponDTO(
+                        coupon.getCode(),
+                        coupon.getDiscount(),
+                        coupon.getValid()))
+                .collect(Collectors.toList());
+
+        return new EventDetailsDTO(
+                event.getId(),
+                event.getTitle(),
+                event.getDescription(),
+                event.getDate(),
+                address.isPresent() ? address.get().getCity() : "",
+                address.isPresent() ? address.get().getUf() : "",
+                event.getImgUrl(),
+                event.getEventUrl(),
+                couponDTOs);
+    }
+
+    public Void deleteEvent(UUID eventId, String adminKey){
+        if(adminKey == null || !adminKey.equals(this.adminKey)){
+            throw new IllegalArgumentException("Invalid admin key");
+        }
+
+        this.repository.delete(this.repository.findById(eventId)
+                .orElseThrow(() -> new IllegalArgumentException("Event not found")));
+
+        return null;
+    }
+
+    public List<EventResponseDTO> searchEvents(String title){
+        title = (title != null) ? title : "";
+
+        List<EventAddressProjection> eventsList = this.repository.findEventsByTitle(title);
+        return eventsList.stream().map(event -> new EventResponseDTO(
+                        event.getId(),
+                        event.getTitle(),
+                        event.getDescription(),
+                        event.getDate(),
+                        event.getCity() != null ? event.getCity() : "",
+                        event.getUf() != null ? event.getUf() : "",
+                        event.getRemote(),
+                        event.getEventUrl(),
+                        event.getImgUrl())
+                )
+                .toList();
+    }
+
+    public List<EventResponseDTO> getFilteredEvents(int page, int size, String city, String uf, Date startDate, Date endDate){
+        city = (city != null) ? city : "";
+        uf = (uf != null) ? uf : "";
+        startDate = (startDate != null) ? startDate : new Date(0);
+        endDate = (endDate != null) ? endDate : new Date();
+
+        Pageable pageable = PageRequest.of(page, size);
+
+        Page<EventAddressProjection> eventsPage = this.repository.findFilteredEvents(city, uf, startDate, endDate, pageable);
+        return eventsPage.map(event -> new EventResponseDTO(
+                        event.getId(),
+                        event.getTitle(),
+                        event.getDescription(),
+                        event.getDate(),
+                        event.getCity() != null ? event.getCity() : "",
+                        event.getUf() != null ? event.getUf() : "",
+                        event.getRemote(),
+                        event.getEventUrl(),
+                        event.getImgUrl())
+                )
+                .stream().toList();
+    }
 
     private String uploadImg(MultipartFile multipartFile) {
         String filename = UUID.randomUUID() + "-" + multipartFile.getOriginalFilename();
 
-        try{
-            File file = this.convertMultipartToFile(multipartFile);
-            s3Client.putObject(bucketName, filename, file);
-            file.delete();
-            return s3Client.getUrl(bucketName, filename).toString();
+        try {
+            PutObjectRequest putOb = PutObjectRequest.builder()
+                    .bucket(bucketName)
+                    .key(filename)
+                    .build();
+            s3Client.putObject(putOb, RequestBody.fromByteBuffer(ByteBuffer.wrap(multipartFile.getBytes())));
+            GetUrlRequest request = GetUrlRequest.builder()
+                    .bucket(bucketName)
+                    .key(filename)
+                    .build();
+
+            return s3Client.utilities().getUrl(request).toString();
         } catch (Exception e) {
-            System.out.println("Erro ao realizar o upload do arquivo");
-            return null;
+            System.out.println("Erro ao subir arquivo");
+            System.out.println(e.getMessage());
+            return "";
         }
     }
 
-    private File convertMultipartToFile(MultipartFile multipartFile) throws IOException {
-        File convFile = new File(Objects.requireNonNull(multipartFile.getOriginalFilename()));
-        FileOutputStream fos = new FileOutputStream(convFile);
-        fos.write(multipartFile.getBytes());
-        fos.close();
-
-        return convFile;
-    }
 }
